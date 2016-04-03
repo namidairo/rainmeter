@@ -1,12 +1,15 @@
 /* Copyright (C) 2011 Rainmeter Project Developers
- *
- * This Source Code Form is subject to the terms of the GNU General Public
- * License; either version 2 of the License, or (at your option) any later
- * version. If a copy of the GPL was not distributed with this file, You can
- * obtain one at <https://www.gnu.org/licenses/gpl-2.0.html>. */
+*
+* This Source Code Form is subject to the terms of the GNU General Public
+* License; either version 2 of the License, or (at your option) any later
+* version. If a copy of the GPL was not distributed with this file, You can
+* obtain one at <https://www.gnu.org/licenses/gpl-2.0.html>. */
 
 #include "StdAfx.h"
 #include "PlayerSpotify.h"
+#include "json/json.hpp"
+
+using JSON = nlohmann::json;
 
 Player* PlayerSpotify::c_Player = nullptr;
 
@@ -15,8 +18,8 @@ Player* PlayerSpotify::c_Player = nullptr;
 **
 */
 PlayerSpotify::PlayerSpotify() : Player(),
-	m_Window(),
-	m_LastCheckTime(0)
+m_Window(),
+m_LastCheckTime(0)
 {
 }
 
@@ -50,7 +53,7 @@ Player* PlayerSpotify::Create()
 bool PlayerSpotify::CheckWindow()
 {
 	DWORD time = GetTickCount();
-		
+
 	// Try to find Spotify window every 5 seconds
 	if (time - m_LastCheckTime > 5000)
 	{
@@ -59,10 +62,19 @@ bool PlayerSpotify::CheckWindow()
 		m_Window = FindWindow(L"SpotifyMainWindow", nullptr);
 		if (m_Window)
 		{
+			if (csrfToken.empty() || openidToken.empty()) {
+				//Get tokens
+				if (!GetTokens()) {
+					m_Initialized = false;
+				}
+			}
 			m_Initialized = true;
 		}
+		else
+		{
+			m_Initialized = false;
+		}
 	}
-
 	return m_Initialized;
 }
 
@@ -74,44 +86,75 @@ void PlayerSpotify::UpdateData()
 {
 	if (m_Initialized || CheckWindow())
 	{
-		// Parse title and artist from window title
-		WCHAR buffer[256];
-		if (GetWindowText(m_Window, buffer, 256) > 10)
+		auto statusParams = L"?oauth=" + openidToken + L"&csrf=" + csrfToken;
+		auto statusJson = Internet::DownloadUrl(m_baseURL + m_statusURL + statusParams, CP_UTF8, originHeader, true);
+		if (statusJson.empty())
 		{
-			std::wstring title = &buffer[10];  // Skip "Spotify - "
-
-			std::wstring::size_type pos = title.find(L" \u2013 ");
-			if (pos != std::wstring::npos)
-			{
-				std::wstring artist(title, 0, pos);
-				pos += 3;  // Skip " - "
-				std::wstring track(title, pos);
-
-				if (track != m_Title || artist != m_Artist)
-				{
-					m_State = STATE_PLAYING;
-					m_Title = track;
-					m_Artist = artist;
-					++m_TrackCount;
-
-					if (m_Measures & MEASURE_LYRICS)
-					{
-						FindLyrics();
-					}
-				}
-				return;
-			}
+			m_Initialized = false;
+			ClearData();
+			return;
 		}
-		else if (IsWindow(m_Window))
+
+		auto j = JSON::parse(statusJson);
+
+		if (!j["error"].is_null())
 		{
-			m_State = STATE_PAUSED;
+			m_Initialized = false;
+			ClearData();
+			return;
 		}
-		else
+
+		if (j["open_graph_state"]["private_session"].get<bool>())
 		{
 			ClearData();
-			m_Initialized = false;
+			return;
 		}
+
+		if (!j["track"].is_null())
+		{
+			m_Title = converter.from_bytes(j["track"]["track_resource"]["name"].get<std::string>());
+			m_Artist = converter.from_bytes(j["track"]["artist_resource"]["name"].get<std::string>());
+			m_Album = converter.from_bytes(j["track"]["album_resource"]["name"].get<std::string>());
+			m_Duration = j["track"]["length"].get<int>();
+			m_Position = j["playing_position"].get<int>();
+			m_Volume = j["volume"].get<int>() * 100;
+			m_State = j["playing"].get<bool>() ? STATE_PLAYING : STATE_PAUSED;
+			m_Shuffle = j["shuffle"].get<bool>();
+			m_Repeat = j["repeat"].get<bool>();
+		}
+
 	}
+}
+
+/*
+** Gets the CSRF and OpenID tokens from the host and the Spotify site respectively.
+**
+*/
+bool PlayerSpotify::GetTokens()
+{
+	auto csrfJson = Internet::DownloadUrl(m_baseURL + m_csrfURL, CP_UTF8, originHeader, true);
+
+	if(csrfJson.empty())
+	{
+		return false;
+	}
+
+	auto j = JSON::parse(csrfJson);
+
+	csrfToken = converter.from_bytes(j["token"].get<std::string>());
+
+	if (csrfToken.empty()) {
+		return false;
+	}
+
+	//Grab OpenID token
+	auto openidJson = Internet::DownloadUrl(m_openidURL, CP_UTF8, originHeader, true);
+	j = JSON::parse(openidJson);
+	openidToken = converter.from_bytes(j["t"].get<std::string>());
+	if (openidJson.empty()) {
+		return false;
+	}
+	return true;
 }
 
 /*
@@ -127,7 +170,7 @@ void PlayerSpotify::Play()
 ** Handles the Stop bang.
 **
 */
-void PlayerSpotify::Stop() 
+void PlayerSpotify::Stop()
 {
 	SendMessage(m_Window, WM_APPCOMMAND, 0, SPOTIFY_STOP);
 }
@@ -136,7 +179,7 @@ void PlayerSpotify::Stop()
 ** Handles the Next bang.
 **
 */
-void PlayerSpotify::Next() 
+void PlayerSpotify::Next()
 {
 	SendMessage(m_Window, WM_APPCOMMAND, 0, SPOTIFY_NEXT);
 }
@@ -145,7 +188,7 @@ void PlayerSpotify::Next()
 ** Handles the Previous bang.
 **
 */
-void PlayerSpotify::Previous() 
+void PlayerSpotify::Previous()
 {
 	SendMessage(m_Window, WM_APPCOMMAND, 0, SPOTIFY_PREV);
 }
@@ -178,24 +221,24 @@ void PlayerSpotify::OpenPlayer(std::wstring& path)
 	{
 		if (path.empty())
 		{
-			// Gotta figure out where Winamp is located at
+			// Gotta figure out where Spotify is located at
 			HKEY hKey;
 			RegOpenKeyEx(HKEY_CLASSES_ROOT,
-						 L"spotify\\DefaultIcon",
-						 0,
-						 KEY_QUERY_VALUE,
-						 &hKey);
+				L"spotify\\DefaultIcon",
+				0,
+				KEY_QUERY_VALUE,
+				&hKey);
 
 			DWORD size = 512;
 			WCHAR* data = new WCHAR[size];
 			DWORD type = 0;
 
 			if (RegQueryValueEx(hKey,
-								nullptr,
-								nullptr,
-								(LPDWORD)&type,
-								(LPBYTE)data,
-								(LPDWORD)&size) == ERROR_SUCCESS)
+				nullptr,
+				nullptr,
+				(LPDWORD)&type,
+				(LPBYTE)data,
+				(LPDWORD)&size) == ERROR_SUCCESS)
 			{
 				if (type == REG_SZ)
 				{
@@ -206,7 +249,7 @@ void PlayerSpotify::OpenPlayer(std::wstring& path)
 				}
 			}
 
-			delete [] data;
+			delete[] data;
 			RegCloseKey(hKey);
 		}
 		else

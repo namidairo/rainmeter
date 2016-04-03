@@ -36,12 +36,18 @@ void Internet::Finalize()
 ** Downloads given url and returns it as a string.
 **
 */
-std::wstring Internet::DownloadUrl(const std::wstring& url, int codepage)
+std::wstring Internet::DownloadUrl(const std::wstring& url, int codepage, LPWSTR headers, bool impatient)
 {
 	// From WebParser.cpp
 	std::wstring result;
 	DWORD flags = INTERNET_FLAG_RESYNCHRONIZE;
-	HINTERNET hUrlDump = InternetOpenUrl(c_NetHandle, url.c_str(), nullptr, 0, flags, 0);
+	DWORD timeout = 2000;
+	HINTERNET hUrlDump = nullptr;
+	if(impatient)
+	{
+		InternetSetOption(hUrlDump, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(DWORD));
+	}
+	hUrlDump = InternetOpenUrl(c_NetHandle, url.c_str(), headers, -1L, flags, 0);
 
 	if (!hUrlDump)
 	{
